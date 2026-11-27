@@ -1,13 +1,12 @@
 """Code evaluation for quantum katas benchmark."""
 
 import ast
+import io
+import multiprocessing
 import re
-import traceback
+import sys
 from dataclasses import dataclass
 from typing import Optional
-import multiprocessing
-import sys
-import io
 
 
 @dataclass
@@ -74,75 +73,23 @@ def check_syntax(code: str) -> tuple[bool, Optional[str]]:
         return False, f"SyntaxError at line {e.lineno}: {e.msg}"
 
 
-def _run_test_worker(code: str, test_code: str, entry_point: str, result_queue):
-    """Worker function for running tests in subprocess."""
+def _grade_worker(code: str, test_code: str, entry_point: str, timeout: float, result_queue):
+    """Run the isolated grader in its own process, so a hung or crashing test can't
+    take the runner down. The grader runs the candidate in a further process that never
+    sees the test source; see benchmark/isolation.py."""
     stdout_capture = io.StringIO()
     old_stdout = sys.stdout
     sys.stdout = stdout_capture
-
     try:
-        # Create execution namespace
-        namespace = {}
+        from benchmark.isolation import grade
 
-        # Execute the solution code
-        exec(code, namespace)
-
-        # Check if entry point exists
-        if entry_point not in namespace:
-            result_queue.put({
-                "passed": False,
-                "error_message": f"Entry point '{entry_point}' not found in solution",
-                "error_type": "MissingEntryPoint",
-                "stdout": stdout_capture.getvalue(),
-            })
-            return
-
-        # Execute test code
-        test_namespace = namespace.copy()
-        exec(test_code, test_namespace)
-
-        # Find and run test function
-        test_func_name = f"test_{entry_point}"
-        if test_func_name not in test_namespace:
-            # Try to find any test function
-            test_funcs = [k for k in test_namespace if k.startswith("test_")]
-            if test_funcs:
-                test_func_name = test_funcs[0]
-            else:
-                result_queue.put({
-                    "passed": False,
-                    "error_message": "No test function found",
-                    "error_type": "MissingTest",
-                    "stdout": stdout_capture.getvalue(),
-                })
-                return
-
-        # Run the test
-        test_namespace[test_func_name]()
-
-        result_queue.put({
-            "passed": True,
-            "error_message": None,
-            "error_type": None,
-            "stdout": stdout_capture.getvalue(),
-        })
-
-    except AssertionError as e:
-        result_queue.put({
-            "passed": False,
-            "error_message": f"AssertionError: {str(e)}",
-            "error_type": "AssertionError",
-            "stdout": stdout_capture.getvalue(),
-        })
-    except Exception as e:
-        result_queue.put({
-            "passed": False,
-            "error_message": f"{type(e).__name__}: {str(e)}",
-            "error_type": type(e).__name__,
-            "stdout": stdout_capture.getvalue(),
-        })
+        result = grade(code, test_code, entry_point, timeout)
+    except BaseException as e:  # noqa: BLE001
+        result = {"passed": False, "error_type": type(e).__name__, "error": str(e)}
     finally:
         sys.stdout = old_stdout
+    result["stdout"] = stdout_capture.getvalue()
+    result_queue.put(result)
 
 
 def run_test(
@@ -153,32 +100,37 @@ def run_test(
 ) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
     """Run test code against solution with timeout.
 
+    The candidate never runs in the process that executes the test or reports the
+    verdict, so it can't patch the checker or report its own pass.
+
     Returns: (passed, error_message, error_type, stdout)
     """
-    result_queue = multiprocessing.Queue()
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue()
 
-    process = multiprocessing.Process(
-        target=_run_test_worker,
-        args=(code, test_code, entry_point, result_queue),
+    process = ctx.Process(
+        target=_grade_worker,
+        args=(code, test_code, entry_point, timeout, result_queue),
     )
     process.start()
-    process.join(timeout=timeout)
+    # Each candidate call has its own `timeout`; the whole test gets a wider bound.
+    process.join(timeout=timeout * 2)
 
     if process.is_alive():
         process.terminate()
         process.join()
-        return False, f"Timeout after {timeout}s", "Timeout", None
+        return False, f"Timeout after {timeout * 2}s", "Timeout", None
 
     if result_queue.empty():
         return False, "Process ended without result", "ProcessError", None
 
     result = result_queue.get()
-    return (
-        result["passed"],
-        result["error_message"],
-        result["error_type"],
-        result["stdout"],
-    )
+    error_type = result.get("error_type")
+    error = result.get("error")
+    error_message = None
+    if not result["passed"]:
+        error_message = f"{error_type}: {error}" if error_type == "AssertionError" else error
+    return result["passed"], error_message, error_type, result.get("stdout")
 
 
 def evaluate_solution(

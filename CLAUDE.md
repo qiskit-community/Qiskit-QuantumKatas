@@ -12,7 +12,8 @@ Benchmark harness that evaluates LLMs on 350 Qiskit-translated Quantum Katas tas
   - [config.py](benchmark/config.py) — `ModelConfig`, `ProviderType`, `PromptStrategy`, `SYSTEM_PROMPTS`, JSON model loading
   - [models.py](benchmark/models.py) — provider clients (anthropic / openai / google / litellm / vllm / qiskit_assistant)
   - [runner.py](benchmark/runner.py) — `BenchmarkRunner`, ablation orchestration, `qk-benchmark` CLI (`main()`)
-  - [evaluator.py](benchmark/evaluator.py) — code extraction + sandboxed test execution via `multiprocessing`
+  - [evaluator.py](benchmark/evaluator.py) — code extraction + test execution with a timeout
+  - [isolation.py](benchmark/isolation.py) — isolated grader: the candidate runs in its own process and never sees the test or decides the verdict. Don't move the candidate back into the test's process (see issue #6)
   - [reporter.py](benchmark/reporter.py) — `qk-compare` CLI, Wilson CIs, markdown reports
 - [dataset/qiskit_quantumkatas.jsonl](dataset/qiskit_quantumkatas.jsonl) — 350 tasks, one per line
 - [models.json](models.json) — model registry loaded automatically by the CLI
